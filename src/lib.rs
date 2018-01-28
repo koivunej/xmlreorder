@@ -201,21 +201,21 @@ mod xpath {
         }
     }
 
-    struct Selector {
+    pub struct Selector {
         operators: Operator,
         tracker: Tracker,
     }
 
     impl Selector {
-        fn update_on_event(&mut self, pos: &Positioning, event: &Event) {
+        pub(crate) fn update_on_event(&mut self, pos: &Positioning, event: &Event) {
             self.tracker.on_event(pos, event);
         }
 
-        fn is_match(&self) -> bool {
+        pub fn is_match(&self) -> bool {
             self.operators.is_match(&self.tracker.snapshot())
         }
 
-        fn parse(s: &str) -> Selector {
+        pub fn parse(s: &str) -> Selector {
             let mut tokens = Tokenizer::from(s.chars());
             let mut buffer: Option<Token> = None;
 
@@ -413,10 +413,74 @@ mod xpath {
 
 #[derive(Default)]
 struct ReorderingOptions<'a> {
-    filtered_attributes: Vec<&'a str>,
+    selectors: Vec<xpath::Selector>,
+    matches: Vec<bool>,
+    filtered_attributes: Vec<(usize, &'a str)>,
+    matched_input: bool,
 }
 
-fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>) -> Vec<Span> {
+impl<'a> ReorderingOptions<'a> {
+    fn new(filtered_attributes: Vec<(xpath::Selector, &'a str)>) -> Self {
+
+        let mut selectors = Vec::new();
+        let mut matches = Vec::new();
+        let mut filtered = Vec::new();
+
+        for (i, (sel, attr)) in filtered_attributes.into_iter().enumerate() {
+            selectors.push(sel);
+            matches.push(false);
+            filtered.push((i, attr));
+        }
+
+        ReorderingOptions {
+            selectors,
+            matches,
+            filtered_attributes: filtered,
+            matched_input: false,
+        }
+    }
+
+    fn on_input_event(&mut self, pos: &Positioning, evt: &Event) {
+        for (i, selector) in self.selectors.iter_mut().enumerate() {
+            selector.update_on_event(pos, evt);
+
+            match *evt {
+                Event::Start(_) |
+                Event::Empty(_) => self.matches[i] = selector.is_match(),
+                _ => self.matches[i] = false,
+            }
+        }
+
+        self.matched_input = true;
+    }
+
+    fn on_example_event(&mut self, pos: &Positioning, evt: &Event) {
+        self.on_input_event(pos, evt);
+        self.matched_input = false;
+    }
+
+    fn filter_input_attributes(&self, attributes: &mut HashMap<Bytes, Bytes>) {
+        assert!(self.matched_input);
+
+        for (i, m) in self.matches.iter().enumerate() {
+            if *m {
+                attributes.remove(self.filtered_attributes[i].1.as_bytes());
+            }
+        }
+    }
+
+    fn filter_example_attributes(&self, attributes: &mut HashMap<Bytes, Bytes>) {
+        assert!(!self.matched_input);
+
+        for (i, m) in self.matches.iter().enumerate() {
+            if *m {
+                attributes.remove(self.filtered_attributes[i].1.as_bytes());
+            }
+        }
+    }
+}
+
+fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>, mut options: ReorderingOptions) -> Vec<Span> {
 
     let mut buffer = Vec::new();
 
@@ -435,12 +499,15 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
             {
                 let evt = input.read_event(&mut buffer).unwrap();
                 input_tracker.on_event(&input, &evt);
+                options.on_input_event(&input, &evt);
+
                 match evt {
                     Event::Eof => break,
                     Event::Text(ref e) if e.len() == 0 => continue,
                     Event::Start(ref e) => {
-                        let attrs = convert_attributes(e.attributes());
-                        // TODO: filter attributes
+                        let mut attrs = convert_attributes(e.attributes());
+                        options.filter_input_attributes(&mut attrs);
+
                         let key = convert_orderedelement(&input_tracker, attrs, false);
                         let start = input_tracker.last_span().unwrap();
 
@@ -451,8 +518,9 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
                         missing_end.push((key, start, Vec::new()));
                     },
                     Event::Empty(ref e) => {
-                        let attrs = convert_attributes(e.attributes());
-                        // TODO: filter attributes
+                        let mut attrs = convert_attributes(e.attributes());
+                        options.filter_input_attributes(&mut attrs);
+
                         let key = convert_orderedelement(&input_tracker, attrs, true);
 
                         let span = input_tracker.last_span().unwrap();
@@ -523,13 +591,15 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
         {
             let evt = example.read_event(&mut buffer).unwrap();
 
+            options.on_example_event(&example, &evt);
             tracker.on_event(&example, &evt);
 
             match evt {
                 Event::Eof => break,
                 Event::Text(ref e) if e.len() == 0 => continue,
                 Event::Start(ref e) => {
-                    let attrs = convert_attributes(e.attributes());
+                    let mut attrs = convert_attributes(e.attributes());
+                    options.filter_example_attributes(&mut attrs);
                     // TODO: filter attributes
                     let mut key = convert_orderedelement(&tracker, attrs, false);
 
@@ -576,8 +646,9 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
                     stack.push((key, order.len(), matching_order));
                 },
                 Event::Empty(ref e) => {
-                    let attrs = convert_attributes(e.attributes());
-                    // TODO: filter attributes
+                    let mut attrs = convert_attributes(e.attributes());
+                    options.filter_example_attributes(&mut attrs);
+
                     let mut key = convert_orderedelement(&tracker, attrs, true);
 
                     if let Some(prefix) = stack.last().as_ref().and_then(|t| t.2.clone()) {
@@ -927,7 +998,8 @@ mod tests {
     use std::collections::HashMap;
     use std::fmt::Display;
     use super::{reorder, convert_attributes, convert_orderedelement};
-    use super::{Span, Tracker, Positioning, OrderedElement};
+    use super::{Span, Tracker, Positioning, OrderedElement, ReorderingOptions};
+    use super::xpath::Selector;
     use quick_xml::reader::Reader;
     use quick_xml::events::{Event, BytesStart};
 
@@ -1095,7 +1167,7 @@ mod tests {
         //
         let output  = r#"<!-- foo --><a><b><c id="1">c1</c><c id="2">c2</c><c id="3"><![CDATA[mod]]></c></b></a>"#;
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), ReorderingOptions::default());
 
         assert_eq!(render(input, &actual), output);
     }
@@ -1149,7 +1221,7 @@ mod tests {
     </b>
 </a>"#;
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), ReorderingOptions::default());
         for span in &actual {
             println!("{:?}", span);
         }
@@ -1161,12 +1233,17 @@ mod tests {
     }
 
     #[test]
-    fn test_it_ignores_attributes_when_only_option_differs() {
+    fn test_filtering_attributes_to_match() {
         let example = r#"<a ver="toolversion1"><b ver="toolversion1"><c id="1">c1</c><c id="2">c2</c><c id="3">orig</c></b></a>"#;
         let input   = r#"<a ver="toolversion2"><b ver="toolversion2"><c id="2">c2</c><c id="3"><![CDATA[mod]]></c><c id="1">c1</c></b></a>"#;
         let output  = r#"<a ver="toolversion2"><b ver="toolversion2"><c id="1">c1</c><c id="2">c2</c><c id="3"><![CDATA[mod]]></c></b></a>"#;
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+        let options = ReorderingOptions::new(vec![
+            (Selector::parse("/a"), "ver"),
+            (Selector::parse("/a/b"), "ver")
+        ]);
+
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), options);
 
         assert_eq!(render(input, &actual), output);
     }
@@ -1180,7 +1257,7 @@ mod tests {
         // outer <inserted> and <b id="more_extra"> are also flushed in the same order, but at
         // different time
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), ReorderingOptions::default());
 
         assert_eq!(render(input, &actual), output);
     }
@@ -1191,7 +1268,7 @@ mod tests {
         let input   = r#"<a><inserted>before</inserted><b><c id="2">c2</c><c id="3"><![CDATA[mod]]></c><c id="1">c1</c></b><b id="more_extra"><just>something</just></b></a>"#;
         let output  = r#"<a><b><c id="1">c1</c><c id="2">c2</c><c id="3"><![CDATA[mod]]></c></b><inserted>before</inserted><b id="more_extra"><just>something</just></b></a>"#;
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), ReorderingOptions::default());
 
         assert_eq!(render(input, &actual), output);
     }

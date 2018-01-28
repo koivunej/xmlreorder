@@ -273,7 +273,6 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
                                 order.push(start.clone());
                                 assert!(order_spans.insert(start));
 
-                                println!("Found!");
                                 // this order is to make sure the descendants we find are the
                                 // actual descendants of this node, not from some other tree
                                 o.key().order.clone()
@@ -287,7 +286,6 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>)
                         }
                     } else {
                         // no prefix, we are skipping
-                        println!("Skipping subtree!");
                         None
                     };
 
@@ -664,7 +662,8 @@ mod tests {
         let attr = convert_attributes(BytesStart::borrowed(input, 1).attributes());
 
         let oe1 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr.clone(), false);
-        let oe2 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr, false);
+        let oe2 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr.clone(), false);
+        //let oe3 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr, true);
 
         assert_eq!(oe1, oe2);
 
@@ -672,7 +671,6 @@ mod tests {
         assert_eq!(map.insert(oe1, 0), None);
         assert_eq!(map.insert(oe2, 1), Some(0));
     }
-
 
     #[test]
     fn test_tracking() {
@@ -790,17 +788,6 @@ mod tests {
         assert_eq!(render(input, &actual), output);
     }
 
-    fn render(input: &str, spans: &Vec<Span>) -> String {
-        let mut s = String::new();
-
-        for span in spans {
-            let range  = span.to_range();
-            s.push_str(&input[range]);
-        }
-
-        s
-    }
-
     #[test]
     fn test_reordering_with_indentation() {
         let example = r#"<a><b><c id="1">c1</c><c id="2">c2</c><c id="3">orig</c></b></a>"#;
@@ -886,66 +873,15 @@ mod tests {
         assert_eq!(render(input, &actual), output);
     }
 
-    /*
-    #[test]
-    fn test_parsing() {
-
-        let input = r#"<a><b><c>foo</c></b></a>"#;
-        //             ^ ^
-        //         0 --' |^ ^
-        //         2 ----'| |^        ^
-        //         3 -----' ||        |^  ^
-        //         5 -------'|        ||  |^  ^
-        //         6 --------'        ||  ||  |
-        //        12 -----------------'|  ||  |
-        //        13 ------------------'  ||  |
-        //        16 ---------------------'|  |
-        //        17 ----------------------'  |
-        //        20 -------------------------'
-
-        let mut spans = Vec::new();
-
-        let mut reader = Reader::from_str(input);
-        let mut buffer = Vec::new();
-
-        loop {
-            match reader.read_event(&mut buffer) {
-                Ok(Event::Start(ref e)) => {
-                    let end = reader.buffer_position() - 1;
-                    let start = end - e.len() - 1;
-                    spans.push(TagSpan::StartTag(Span::new(start, end), e.name().to_owned()));
-                    println!("{}..{} START", start, end);
-                },
-                Ok(Event::End(ref e)) => {
-                    let end = reader.buffer_position() - 1;
-                    let start = end - e.len() - 1;
-                    spans.push(TagSpan::EndTag(Span::new(start, end), e.name().to_owned()));
-                    println!("{}..{} END", start, end);
-                },
-                Ok(Event::Eof) => break,
-                _ => {},
-            }
-        }
+    fn render(input: &str, spans: &Vec<Span>) -> String {
+        let mut s = String::new();
 
         for span in spans {
-            match span {
-                TagSpan::StartTag(span, name) |
-                TagSpan::EndTag(span, name) => println!("{:?} => {:?}", span, str::from_utf8(&name)),
-            }
+            let range  = span.to_range();
+            s.push_str(&input[range]);
         }
 
-        assert!(false);
-    }*/
-
-    #[derive(PartialEq, Debug)]
-    enum TagSpan {
-        StartTag(Span, Vec<u8>),
-        EndTag(Span, Vec<u8>)
+        s
     }
 
-    fn record(s: &mut Vec<u8>, input: &[u8]) -> usize {
-        let before = s.len();
-        s.extend(input);
-        return before;
-    }
 }

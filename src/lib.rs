@@ -188,7 +188,6 @@ mod xpath {
 
                     for inner in inners {
                         let m = inner.is_match(&snapshot);
-                        println!("{:?} matches {:?}: {}", inner, snapshot, m);
                         if !m {
                             return false;
                         }
@@ -223,7 +222,6 @@ mod xpath {
 
             loop {
                 let next = buffer.take().or_else(|| tokens.next());
-                println!("looking at token: {:?}", next);
                 match next {
                     Some(Token::Slash) => {
 
@@ -250,8 +248,6 @@ mod xpath {
                     None => break,
                 }
             }
-
-            println!("parsed operators: {:?}", operators);
 
             let operators = if operators.len() == 1 {
                 operators.pop().unwrap()
@@ -348,8 +344,6 @@ mod xpath {
 
             let next = self.buffer.take().or_else(|| self.chars.next());
 
-            println!("tokenizer looking at {:?}", next);
-
             match next {
                 Some('/') => {
                     match self.chars.next() {
@@ -389,12 +383,10 @@ mod xpath {
                             Some(ch @ 'A'...'Z') |
                             Some(ch @ 'a'...'z') => s.push(ch),
                             Some(other) => {
-                                println!("bailing on name at {}", other);
                                 self.buffer = Some(other);
                                 return Some(Token::Name(s));
                             }
                             None => {
-                                println!("eoffed while reading name: {}", s);
                                 self.eoffed = true;
                                 return Some(Token::Name(s));
                             }
@@ -411,16 +403,37 @@ mod xpath {
 
 }
 
+pub struct ReorderingOptionsBuilder {
+    filtered_attributes: Vec<(xpath::Selector, Cow<'static, str>)>,
+}
+
+impl ReorderingOptionsBuilder {
+    pub fn new() -> Self {
+        ReorderingOptionsBuilder {
+            filtered_attributes: Vec::new(),
+        }
+    }
+
+    pub fn add_filtered_attribute(&mut self, xpath: &str, attr: &str) {
+        self.filtered_attributes.push((xpath::Selector::parse(xpath), Cow::Owned(String::from(attr))));
+    }
+
+
+    pub fn build(self) -> ReorderingOptions<'static> {
+        ReorderingOptions::new(self.filtered_attributes)
+    }
+}
+
 #[derive(Default)]
-struct ReorderingOptions<'a> {
+pub struct ReorderingOptions<'a> {
     selectors: Vec<xpath::Selector>,
     matches: Vec<bool>,
-    filtered_attributes: Vec<(usize, &'a str)>,
+    filtered_attributes: Vec<(usize, Cow<'a, str>)>,
     matched_input: bool,
 }
 
 impl<'a> ReorderingOptions<'a> {
-    fn new(filtered_attributes: Vec<(xpath::Selector, &'a str)>) -> Self {
+    fn new(filtered_attributes: Vec<(xpath::Selector, Cow<'a, str>)>) -> Self {
 
         let mut selectors = Vec::new();
         let mut matches = Vec::new();
@@ -480,7 +493,7 @@ impl<'a> ReorderingOptions<'a> {
     }
 }
 
-fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>, mut options: ReorderingOptions) -> Vec<Span> {
+pub fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>, mut options: ReorderingOptions) -> Vec<Span> {
 
     let mut buffer = Vec::new();
 
@@ -609,7 +622,6 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>,
                             key.set_order(prefix);
                             true
                         } else {
-                            println!("try_matching = false with parent_counts: {:?}", tracker.parent_counts());
                             false
                         }
                     } else {
@@ -632,7 +644,6 @@ fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader<B>,
                                 o.key().order.clone()
                             },
                             _ => {
-                                println!("Nothing found for {:?}", key);
                                 None
                                 // we should probably skip the whole subtree here?
                                 //panic!("Could not find unique element for {:?}", key);
@@ -939,7 +950,7 @@ impl Tracker {
 }
 
 #[derive(PartialEq, Debug, Clone, Hash, Eq)]
-pub(crate) struct Span {
+pub struct Span {
     start: usize,
     end: usize,
 }
@@ -961,10 +972,8 @@ impl Span {
 
     fn fuse(&mut self, other: &Span) {
         if self.start == other.end + 1 {
-            println!("fusing {:?} to the left with {:?}", self, other);
             self.start = other.start;
         } else if other.start > 0 && self.end == other.start - 1 {
-            println!("fusing {:?} to the right with {:?}", self, other);
             self.end = other.end;
         } else {
             assert!(false, "Cannot fuse {:?} with unconnected {:?}", self, other);
@@ -987,7 +996,7 @@ impl Span {
         self.end = cmp::max(self.end, other.end);
     }
 
-    fn to_range(&self) -> std::ops::Range<usize> {
+    pub fn to_range(&self) -> std::ops::Range<usize> {
         self.start..self.end + 1
     }
 }
@@ -998,7 +1007,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fmt::Display;
     use super::{reorder, convert_attributes, convert_orderedelement};
-    use super::{Span, Tracker, Positioning, OrderedElement, ReorderingOptions};
+    use super::{Span, Tracker, Positioning, OrderedElement, ReorderingOptions, ReorderingOptionsBuilder};
     use super::xpath::Selector;
     use quick_xml::reader::Reader;
     use quick_xml::events::{Event, BytesStart};
@@ -1238,12 +1247,12 @@ mod tests {
         let input   = r#"<a ver="toolversion2"><b ver="toolversion2"><c id="2">c2</c><c id="3"><![CDATA[mod]]></c><c id="1">c1</c></b></a>"#;
         let output  = r#"<a ver="toolversion2"><b ver="toolversion2"><c id="1">c1</c><c id="2">c2</c><c id="3"><![CDATA[mod]]></c></b></a>"#;
 
-        let options = ReorderingOptions::new(vec![
-            (Selector::parse("/a"), "ver"),
-            (Selector::parse("/a/b"), "ver")
-        ]);
+        let mut options = ReorderingOptionsBuilder::new();
 
-        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), options);
+        options.add_filtered_attribute("/a", "ver");
+        options.add_filtered_attribute("/a/b", "ver");
+
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input), options.build());
 
         assert_eq!(render(input, &actual), output);
     }

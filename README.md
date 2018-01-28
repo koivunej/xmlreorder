@@ -77,6 +77,7 @@ Since elements are matched as `(path, order, name, attributes)` tuples inside `x
 
 `example2.xml`:
 
+```
 <?xml version="1.0"?>
 <example version="0.1.2.3">
   <memorydump name="Foo">content1</memorydump>

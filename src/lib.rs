@@ -42,14 +42,35 @@ impl<R: BufRead> Positioning for Reader<R> {
     }
 }
 
+// These could be Rc<[u8]> or Rc<Vec<u8>>
 type Bytes = Vec<u8>;
 
 #[derive(Debug, Eq, Clone)]
 struct OrderedElement {
+    // path to this element, as in the list of ancestors including the name of this element.
     path: Vec<Bytes>,
+    // "order" as in for our path, what are the order numbers of our path elements.
+    // For example given a path `/a/b/c` and counts Some(vec![1, 2, 3]) means
+    // this element is:
+    //
+    // ```
+    // <a>
+    //   <b><!-- anything --></b>
+    //   <b>
+    //      <c><!-- HERE --></c>
+    //   </b>
+    //   <!-- anything -->
+    // </a>
+    // ```
+    //
+    // `None` or shorter (from the end) order is given for the OrderedElement values
+    // read from the example to ensure matching only the children of a particular parent.
     order: Option<Vec<usize>>,
+    // attributes from the input or example.
     attributes: HashMap<Bytes, Bytes>,
+    // precalculated hash of attributes in some stable order
     attr_hash: u64,
+    // was this element empty; turns out this might not be so interesting
     empty: bool
 }
 
@@ -60,11 +81,13 @@ impl OrderedElement {
         use std::hash::Hash;
 
         let mut hasher = DefaultHasher::default();
+
         {
             let mut tmp = attributes.iter().collect::<Vec<_>>();
             tmp.sort_by(|a, b| a.0.cmp(b.0));
             tmp.hash(&mut hasher);
         }
+
         let attr_hash = hasher.finish();
 
         OrderedElement {
@@ -90,20 +113,15 @@ impl std::hash::Hash for OrderedElement {
         self.path.hash(state);
         //self.order.hash(state);
         self.attr_hash.hash(state);
-        // FIXME: empty should probably not be here; we want empty examples be expanded from
-        // input...
-        self.empty.hash(state);
+
+        // since these comparisons are (hopefully) mostly done to find the original using an
+        // example, empty is not included here as it's not included in PartialEq.
     }
 }
 
 impl PartialEq for OrderedElement {
     fn eq(&self, other: &OrderedElement) -> bool {
         use std::cmp::min;
-
-        // FIXME: empty should probably not be here
-        if self.empty != other.empty {
-            return false;
-        }
 
         match (self.order.as_ref(), other.order.as_ref()) {
             (Some(our_order), Some(other_order)) => {
@@ -663,13 +681,15 @@ mod tests {
 
         let oe1 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr.clone(), false);
         let oe2 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr.clone(), false);
-        //let oe3 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr, true);
+        let oe3 = OrderedElement::new(vec![b"foo".to_vec(), b"bar".to_vec(), b"a".to_vec()], vec![1, 1, 1, 0], attr, true);
 
         assert_eq!(oe1, oe2);
+        assert_eq!(oe2, oe3);
 
         let mut map = HashMap::new();
         assert_eq!(map.insert(oe1, 0), None);
         assert_eq!(map.insert(oe2, 1), Some(0));
+        assert_eq!(map.insert(oe3, 2), Some(1));
     }
 
     #[test]
@@ -867,6 +887,17 @@ mod tests {
         // c[@id = "2"] and c[@id = "3"] should be output in the order in which they appear
         // outer <inserted> and <b id="more_extra"> are also flushed in the same order, but at
         // different time
+
+        let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
+
+        assert_eq!(render(input, &actual), output);
+    }
+
+    #[test]
+    fn test_it_reorders_with_empties_in_example() {
+        let example = r#"<a><b><c id="1" /></b></a>"#;
+        let input   = r#"<a><inserted>before</inserted><b><c id="2">c2</c><c id="3"><![CDATA[mod]]></c><c id="1">c1</c></b><b id="more_extra"><just>something</just></b></a>"#;
+        let output  = r#"<a><b><c id="1">c1</c><c id="2">c2</c><c id="3"><![CDATA[mod]]></c></b><inserted>before</inserted><b id="more_extra"><just>something</just></b></a>"#;
 
         let actual = super::reorder(Reader::from_str(example), Reader::from_str(input));
 

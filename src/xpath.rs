@@ -1,6 +1,6 @@
 use std::str::Chars;
 use quick_xml::events::Event;
-use super::{Positioning, Tracker, TrackerSnapshot};
+use super::{Span, Tracker, TrackerSnapshot};
 
 #[derive(Debug)]
 enum Operator {
@@ -56,8 +56,8 @@ pub struct Selector {
 }
 
 impl Selector {
-    pub(crate) fn update_on_event(&mut self, pos: &Positioning, event: &Event) {
-        self.tracker.on_event(pos, event);
+    pub(crate) fn update_on_event(&mut self, span: Option<Span>, event: &Event) {
+        self.tracker.on_event(span, event);
     }
 
     pub fn is_match(&self) -> bool {
@@ -114,6 +114,7 @@ impl Selector {
 
 #[test]
 fn parse_simple() {
+    use super::Positioning;
     use quick_xml::reader::Reader;
     let mut s = Selector::parse("/foo/bar/car");
 
@@ -143,7 +144,7 @@ fn parse_simple() {
 
     loop {
         let evt = reader.read_event(&mut buffer).unwrap();
-        s.update_on_event(&reader, &evt);
+        s.update_on_event(reader.span_for(&evt), &evt);
         match evt {
             Event::Start(ref e) | Event::Empty(ref e) => if s.is_match() { matches += 1; },
             Event::Eof => break,

@@ -23,6 +23,15 @@ mod xpath;
 trait Positioning {
     fn start_tag_span(&self, tag: &BytesStart, empty: bool) -> Span;
     fn end_tag_span(&self, tag: &BytesEnd) -> Span;
+
+    fn span_for(&self, evnt: &Event) -> Option<Span> {
+        match *evnt {
+            Event::Start(ref e) => Some(self.start_tag_span(e, false)),
+            Event::Empty(ref e) => Some(self.start_tag_span(e, true)),
+            Event::End(ref e)   => Some(self.end_tag_span(e)),
+            _ => None,
+        }
+    }
 }
 
 impl<R: BufRead> Positioning for Reader<R> {
@@ -200,9 +209,9 @@ impl<'a> ReorderingOptions<'a> {
         }
     }
 
-    fn on_input_event(&mut self, pos: &Positioning, evt: &Event) {
+    fn on_input_event(&mut self, span: Option<Span>, evt: &Event) {
         for (i, selector) in self.selectors.iter_mut().enumerate() {
-            selector.update_on_event(pos, evt);
+            selector.update_on_event(span.clone(), evt);
 
             match *evt {
                 Event::Start(_) |
@@ -214,8 +223,8 @@ impl<'a> ReorderingOptions<'a> {
         self.matched_input = true;
     }
 
-    fn on_example_event(&mut self, pos: &Positioning, evt: &Event) {
-        self.on_input_event(pos, evt);
+    fn on_example_event(&mut self, span: Option<Span>, evt: &Event) {
+        self.on_input_event(span, evt);
         self.matched_input = false;
     }
 
@@ -258,8 +267,10 @@ pub fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader
         loop {
             {
                 let evt = input.read_event(&mut buffer).unwrap();
-                input_tracker.on_event(&input, &evt);
-                options.on_input_event(&input, &evt);
+                let span = input.span_for(&evt);
+
+                input_tracker.on_event(span.clone(), &evt);
+                options.on_input_event(span, &evt);
 
                 match evt {
                     Event::Eof => break,
@@ -351,8 +362,10 @@ pub fn reorder<A: BufRead, B: BufRead>(mut example: Reader<A>, mut input: Reader
         {
             let evt = example.read_event(&mut buffer).unwrap();
 
-            options.on_example_event(&example, &evt);
-            tracker.on_event(&example, &evt);
+            let span = example.span_for(&evt);
+
+            options.on_example_event(span.clone(), &evt);
+            tracker.on_event(span, &evt);
 
             match evt {
                 Event::Eof => break,
@@ -628,7 +641,7 @@ impl Tracker {
         self.last_span.clone()
     }
 
-    fn on_event(&mut self, pos: &Positioning, event: &Event) {
+    fn on_event(&mut self, span: Option<Span>, event: &Event) {
         if self.at_empty {
             self.pop_path(None);
             self.last_span = None;
@@ -644,8 +657,7 @@ impl Tracker {
                 }
 
                 self.counters.push(0); // does not yet have any children
-                self.last_span = Some(pos.start_tag_span(e, false));
-                //self.spans.push(pos.start_tag_span(e, false));
+                self.last_span = Some(span.unwrap());
             },
             Event::Empty(ref e) => {
                 self.at_empty = true;
@@ -656,20 +668,12 @@ impl Tracker {
                     *last += 1;
                 }
 
-                self.last_span = Some(pos.start_tag_span(e, true));
-
-                //self.spans.push(pos.start_tag_span(e, true));
-                //return Some(self.spans.last().cloned().unwrap());
+                self.last_span = Some(span.unwrap());
             },
             Event::End(ref e) => {
                 self.pop_path(Some(e.name()));
-
                 self.counters.pop().unwrap();
-
-                let end = pos.end_tag_span(e);
-                self.last_span = Some(end);
-
-                //return Some((start.0, end.1));
+                self.last_span = Some(span.unwrap());
             },
             _ => {},
         }
@@ -825,7 +829,7 @@ mod tests {
         loop {
             {
                 let evt = reader.read_event(&mut buffer).unwrap();
-                tracker.on_event(&reader, &evt);
+                tracker.on_event(reader.span_for(&evt), &evt);
                 match evt {
                     Event::Eof => break,
                     Event::Text(ref e) if e.len() == 0 => continue,

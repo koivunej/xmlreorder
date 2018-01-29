@@ -3,14 +3,28 @@ use quick_xml::events::Event;
 use super::{Span, Tracker, TrackerSnapshot};
 
 #[derive(Debug)]
+enum Predicate {
+    Name(String),
+    Wildcard,
+    // Expr....?
+}
+
+impl Predicate {
+    fn is_match(&self, snapshot: &TrackerSnapshot) -> bool {
+        match *self {
+            Predicate::Name(ref s) => snapshot.path.len() > 0 && snapshot.path[0] == s.as_bytes(),
+            Predicate::Wildcard => snapshot.path.len() > 0
+        }
+    }
+}
+
+#[derive(Debug)]
 enum Operator {
     // `/name`
-    Descendant(String),
+    Descendant(Predicate),
     // `//name`
-    DeeperDescendant(String),
-    // `*`
-    Wildcard,
-    // `[1]`
+    DeeperDescendant(Predicate),
+    // `something[1]`
     Position(Box<Operator>, usize),
     List(Vec<Operator>),
     //Predicate(Box<Operator>, Predicate),
@@ -19,14 +33,22 @@ enum Operator {
 impl Operator {
     fn is_match(&mut self, snapshot: &TrackerSnapshot) -> bool {
         match *self {
-            Operator::Descendant(ref name) => {
-                snapshot.path.len() > 0 && snapshot.path[0] == name.as_bytes()
+            Operator::Descendant(ref predicate) => {
+                predicate.is_match(snapshot)
             },
-            Operator::DeeperDescendant(ref name) => {
-                snapshot.path.iter().any(|x| &x[..] == name.as_bytes())
-            },
-            Operator::Wildcard => {
-                !snapshot.path.is_empty()
+            Operator::DeeperDescendant(ref predicate) => {
+                let mut snapshot = snapshot.clone();
+                while snapshot.path.len() > 0 {
+                    if predicate.is_match(&snapshot) {
+                        // we should probably bind to expr that comes next
+                        // as it should only match on a snapshot or it's tails
+                        //
+                        // also, there might had been multiple matches
+                        return true;
+                    }
+                    snapshot = snapshot.tail();
+                }
+                false
             },
             Operator::Position(ref mut inner, ref mut one_based_index) => {
                 if one_based_index == &0 {
@@ -38,7 +60,7 @@ impl Operator {
                     return one_based_index == &0;
                 }
 
-                return false;
+                false
             },
             Operator::List(ref mut inners) => {
                 let mut snapshot = *snapshot;
@@ -71,6 +93,15 @@ impl Selector {
         self.operators.is_match(&self.tracker.snapshot())
     }
 
+    fn parse_predicate(next: Option<Token>) -> Result<Predicate, Option<Token>> {
+        match next {
+            Some(Token::Name(s)) => Ok(Predicate::Name(s)),
+            Some(Token::Star) => Ok(Predicate::Wildcard),
+            Some(other) => Err(Some(other)),
+            None => Err(None),
+        }
+    }
+
     pub fn parse(s: &str) -> Selector {
         let mut tokens = Tokenizer::from(s.chars());
         let mut buffer: Option<Token> = None;
@@ -83,23 +114,17 @@ impl Selector {
 
             let next = buffer.take().or_else(|| tokens.next());
             match next {
-                Some(Token::Slash) => {
-
-                    if let Some(Token::Name(name)) = tokens.next() {
-                        operators.push(Operator::Descendant(name));
-                        continue;
+                Some(start @ Token::Slash) => {
+                    match Self::parse_predicate(tokens.next()) {
+                        Ok(pred) => operators.push(Operator::Descendant(pred)),
+                        Err(_) => panic!("Expected predicate after {:?}: {}", start, s),
                     }
-
-                    panic!("Expected name after Slash: {}", s);
                 },
-                Some(Token::DoubleSlash) => {
-
-                    if let Some(Token::Name(name)) = tokens.next() {
-                        operators.push(Operator::DeeperDescendant(name));
-                        continue;
+                Some(start @ Token::DoubleSlash) => {
+                    match Self::parse_predicate(tokens.next()) {
+                        Ok(pred) => operators.push(Operator::DeeperDescendant(pred)),
+                        Err(_) => panic!("Expected predicate after {:?}: {}", start, s),
                     }
-
-                    panic!("Expected name after DoubleSlash: {}", s);
                 }
                 Some(Token::Name(_)) => {
                     panic!("Invalid top level name: {}", s);
@@ -188,6 +213,7 @@ fn parse_simple() {
     use quick_xml::reader::Reader;
     let mut s1 = Selector::parse("/foo/bar/car");
     let mut s2 = Selector::parse("(//car)[3]");
+    let mut s3 = Selector::parse("/foo//*");
 
     let input =
         r#"<foo>
@@ -214,15 +240,18 @@ fn parse_simple() {
     let mut s1_matches = 0;
     let mut s2_matches = 0;
     let mut s2_text = None;
+    let mut s3_matches = 0;
 
     loop {
         let evt = reader.read_event(&mut buffer).unwrap();
         s1.update_on_event(reader.span_for(&evt), &evt);
         s2.update_on_event(reader.span_for(&evt), &evt);
+        s3.update_on_event(reader.span_for(&evt), &evt);
         match evt {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 if s1.is_match() { s1_matches += 1; }
                 if s2.is_match() { s2_matches += 1; }
+                if s3.is_match() { s3_matches += 1; }
             },
             Event::Text(ref e) if s2_matches == 1 && !e.is_empty() && s2_text.is_none() => {
                 s2_text = Some(e.unescaped().unwrap().into_owned());
@@ -235,6 +264,7 @@ fn parse_simple() {
     assert_eq!(s1_matches, 4);
     assert_eq!(s2_matches, 1);
     assert_eq!(s2_text, Some(b"foobar".to_vec()));
+    assert_eq!(s3_matches, 11);
 }
 
 #[derive(Debug)]
